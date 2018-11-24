@@ -1,128 +1,121 @@
-import cv2, os, time
-from threading import Thread
-from queue import Queue
+#!/usr/bin/env python3
+import cv2, os, time, queue, base64, threading, logging
+import numpy as np
 
-def extractFrames(count):
-    # globals
-    outputDir    = 'frames'
-    clipFileName = 'clip.mp4'
-
-    # open the video clip
-    vidcap = cv2.VideoCapture(clipFileName)
-
-    # create the output directory if it doesn't exist
-    if not os.path.exists(outputDir):
-        print("Output directory {} didn't exist, creating".format(outputDir))
-        os.makedirs(outputDir)
-
-    success,image = vidcap.read()
-    if success:
-        cv2.imwrite("{}/frame_{:04d}.jpg".format(outputDir, count), image)   
-        return 'Reading frame {}'.format(count)
-    else:
-        return None
-
-def convertToGrayscale():
-    # globals
-    outputDir    = 'frames'
-
-    # initialize frame count
-    count = 0
-
-    # get the next frame file name
-    inFileName = "{}/frame_{:04d}.jpg".format(outputDir, count)
-
-    # load the next file
-    inputFrame = cv2.imread(inFileName, cv2.IMREAD_COLOR)
-
-    while inputFrame is not None:
-        print("Converting frame {}".format(count))
-
-        # convert the image to grayscale
-        grayscaleFrame = cv2.cvtColor(inputFrame, cv2.COLOR_BGR2GRAY)
-        
-        # generate output file name
-        outFileName = "{}/grayscale_{:04d}.jpg".format(outputDir, count)
-
-        # write output file
-        cv2.imwrite(outFileName, grayscaleFrame)
-
-        count += 1
-
-        # generate input file name for the next frame
-        inFileName = "{}/frame_{:04d}.jpg".format(outputDir, count)
-
-        # load the next frame
-        inputFrame = cv2.imread(inFileName, cv2.IMREAD_COLOR)
-
-def displayFrames():
-    # globals
-    outputDir    = 'frames'
-    frameDelay   = 42       # the answer to everything
-
-    # initialize frame count
-    count = 0
-
-    startTime = time.time()
-
-    # Generate the filename for the first frame 
-    frameFileName = "{}/grayscale_{:04d}.jpg".format(outputDir, count)
-
-    # load the frame
-    frame = cv2.imread(frameFileName)
-
-    while frame is not None:
-        
-        print("Displaying frame {}".format(count))
-        # Display the frame in a window called "Video"
-        cv2.imshow("Video", frame)
-
-        # compute the amount of time that has elapsed
-        # while the frame was processed
-        elapsedTime = int((time.time() - startTime) * 1000)
-        print("Time to process frame {} ms".format(elapsedTime))
-        
-        # determine the amount of time to wait, also
-        # make sure we don't go into negative time
-        timeToWait = max(1, frameDelay - elapsedTime)
-
-        # Wait for 42 ms and check if the user wants to quit
-        if cv2.waitKey(timeToWait) and 0xFF == ord("q"):
-            break    
-
-        # get the start time for processing the next frame
-        startTime = time.time()
-        
-        # get the next frame filename
-        count += 1
-        frameFileName = "{}/grayscale_{:04d}.jpg".format(outputDir, count)
-
-        # Read the next frame file
-        frame = cv2.imread(frameFileName)
-
-    # make sure we cleanup the windows, otherwise we might end up with a mess
-    cv2.destroyAllWindows()
-
-queue = Queue(10)
-
-class Producer(Thread):
+class extract_Thread(threading.Thread):
+    def __init__(self, fileName, extract_queue):
+        threading.Thread.__init__(self)
+        self.file = fileName
+        self.Q = extract_queue
+    
     def run(self):
-        global queue
+        print("Extract_Thread")
+        # Initialize frame count 
         count = 0
-        while True:
-            frame = extractFrames(count)
-            queue.put(frame)
-            print("Produced: ", frame)
+        # open video file
+        vidcap = cv2.VideoCapture(self.file)
+        # read first image
+        success,image = vidcap.read()
+        print("Reading frame {} {} ".format(count, success))
+        while success:
+            # get a jpg encoded frame
+            success, jpgImage = cv2.imencode('.jpg', image)
+            #encode the frame as base 64 to make debugging easier
+            jpgAsText = base64.b64encode(jpgImage)
+            # add the frame to the buffer
+            self.Q.put(jpgAsText)
+            success,image = vidcap.read()
+            print('Reading frame {} {}'.format(count, success))
             count += 1
 
-class Consumer(Thread):
-    def run(self):
-        global queue
-        while True:
-            frame = queue.get()
-            queue.task_done()
-            print("Consumer: ", frame)
+        print("Frame extraction complete")
 
-Producer().start()
-Consumer().start()
-            
+class convert_Thread(threading.Thread):
+    def __init__(self, extract_queue, display_queue):
+        threading.Thread.__init__(self)
+        self.extract_Q = extract_queue
+        self.display_Q = display_queue
+
+    def run(self):
+        print("Convert_Thread")
+        # initialize frame count
+        count = 0
+        # get the next frame file name
+        inFrame = self.extract_Q.get()
+        # load the next file
+        inputFrame = cv2.imread(inFrame, cv2.IMREAD_COLOR)
+        while inputFrame is not None:
+            print("Converting frame {}".format(count))
+            # convert the image to grayscale
+            grayscaleFrame = cv2.cvtColor(inputFrame, cv2.COLOR_BGR2GRAY)
+            self.display_Q.put(grayscaleFrame)
+            count += 1
+            # load the next frame
+            inputFrame = cv2.imread(inFrame, cv2.IMREAD_COLOR)
+
+class display_Thread(threading.Thread):
+    def __init__(self, display_queue):
+        threading.Thread.__init__(self)
+        self.Q = display_queue
+    
+    def run(self):
+        print("Display_Thread")
+        # initialize frame count
+        count = 0
+        # go through each frame in the buffer until the buffer is empty
+        while not self.Q.empty():
+            # get the next frame
+            frameAsText = self.Q.get()
+            # decode the frame 
+            jpgRawImage = base64.b64decode(frameAsText)
+            # convert the raw frame to a numpy array
+            jpgImage = np.asarray(bytearray(jpgRawImage), dtype=np.uint8)
+            # get a jpg encoded frame
+            img = cv2.imdecode( jpgImage ,cv2.IMREAD_UNCHANGED)
+            print("Displaying frame {}".format(count))        
+            # display the image in a window called "video" and wait 42ms
+            # before displaying the next frame
+            cv2.imshow("Video", img)
+            if cv2.waitKey(42) and 0xFF == ord("q"):
+                break
+            count += 1
+
+        print("Finished displaying all frames")
+        # cleanup the windows
+        cv2.destroyAllWindows()
+
+class my_Queue(queue.Queue):
+    def __init__(self):
+        self.sem_full = threading.Semaphore(0)
+        self.sem_empty = threading.Semaphore(10)
+        self.q_lock = threading.Lock()
+    
+    def put(self, v):
+        print("Putting in QUEUE")
+        # Acquire rights to 1 empty queue
+        self.sem_empty.acquire()
+        # Insert into queue
+        self.q_lock.acquire()
+        self.put(v)
+        self.q_lock.release()
+        # Release rights to 1 full queue
+        self.sem_full.release()
+
+    def get(self):
+        # Acquire rights to 1 full queue
+        self.sem_full.acquire()
+        # Delete from queue
+        self.q_lock.acquire()
+        val = self.get()
+        self.q_lock.release()
+        # Release rights to 1 empty queue
+        self.sem_empty.release()
+        return val
+
+file = "clip.mp4"
+extract_queue = my_Queue()
+display_queue = my_Queue()
+
+extract_Thread(file, extract_queue).start()
+convert_Thread(extract_queue, display_queue).start()
+display_Thread(display_queue).start()
